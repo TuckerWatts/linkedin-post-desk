@@ -32,3 +32,32 @@ export function formatInZone(date: Date | string, tz: string, opts: Intl.DateTim
   return new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", ...opts })
     .format(new Date(date));
 }
+
+export type TimeZoneOption = { value: string; label: string };
+
+/**
+ * Time zones for a picker, grouped by region, labelled with the city in plain words and its current UTC offset:
+ * "New York (GMT-5)". `current` is always included, even if this browser doesn't list it. Empty when the browser
+ * can't list time zones (then a plain text field is the fallback).
+ */
+export function timeZoneOptions(current: string, now = new Date()): { region: string; options: TimeZoneOption[] }[] {
+  const list = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.("timeZone") ?? [];
+  if (!list.length) return [];
+  const zones = list.includes(current) || !current ? list : [current, ...list];
+  const groups = new Map<string, TimeZoneOption[]>();
+  for (const z of zones) {
+    const parts = z.split("/");
+    const region = parts.length > 1 ? parts[0] : "Other";
+    const city = parts[parts.length - 1].replace(/_/g, " ");
+    let offset = "";
+    try {
+      offset = new Intl.DateTimeFormat("en-US", { timeZone: z, timeZoneName: "shortOffset" })
+        .formatToParts(now).find((p) => p.type === "timeZoneName")?.value ?? "";
+    } catch { continue; }
+    if (!groups.has(region)) groups.set(region, []);
+    groups.get(region)!.push({ value: z, label: offset ? `${city} (${offset})` : city });
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)))
+    .map(([region, options]) => ({ region, options: options.sort((a, b) => a.label.localeCompare(b.label)) }));
+}

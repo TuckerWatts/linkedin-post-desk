@@ -1,0 +1,36 @@
+# Free scheduler: calls the app's job endpoints on a timer.
+# Use this OR vercel.json crons (Vercel's Hobby plan only runs crons once a day).
+# Repo secrets needed: APP_URL (https://your-app.example.com) and CRON_SECRET.
+name: scheduler
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # publish + reshare
+    - cron: "7 */3 * * *"    # pull new comments (every 3 hours, light on API limits)
+    - cron: "13 11 * * *"    # autofill drafts (daily)
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Job to run (all, publish, reshare, comments, autofill)"
+        default: "all"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pick job
+        id: pick
+        run: |
+          case "${{ github.event.schedule }}" in
+            "7 */3 * * *") echo "job=comments" >> "$GITHUB_OUTPUT" ;;
+            "13 11 * * *") echo "job=autofill" >> "$GITHUB_OUTPUT" ;;
+            *) echo "job=${{ github.event.inputs.job || 'all' }}" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Call app
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$CRON_SECRET" ]; then echo "Set APP_URL and CRON_SECRET repo secrets"; exit 1; fi
+          curl -fsS -m 90 -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/${{ steps.pick.outputs.job }}"

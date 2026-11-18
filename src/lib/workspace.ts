@@ -6,16 +6,21 @@ export type Workspace = {
   name: string;
   timezone: string;
   voice: string;
-  github_repo: string | null;
+  /** Times of day new drafts are suggested for: keys of POSTING_WINDOWS. */
+  posting_windows: string[];
+  /** Carousel color (#RRGGBB), or null for the neutral default. */
+  carousel_color: string | null;
 };
+
+const COLS = "id, name, timezone, voice, posting_windows, carousel_color";
 
 /** Single-workspace mode: the first workspace, created on first use. */
 export async function getWorkspace(): Promise<Workspace> {
-  const ws = await one<Workspace>("SELECT id, name, timezone, voice, github_repo FROM workspaces ORDER BY created_at LIMIT 1");
+  const ws = await one<Workspace>(`SELECT ${COLS} FROM workspaces ORDER BY created_at LIMIT 1`);
   if (ws) return ws;
   const created = await one<Workspace>(
-    "INSERT INTO workspaces (name, timezone, github_repo) VALUES ($1, $2, $3) RETURNING id, name, timezone, voice, github_repo",
-    [env.workspaceName, env.timezone, env.github.repo || null],
+    `INSERT INTO workspaces (name, timezone) VALUES ($1, $2) RETURNING ${COLS}`,
+    [env.workspaceName, env.timezone],
   );
   return created!;
 }
