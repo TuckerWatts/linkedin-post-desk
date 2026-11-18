@@ -1,26 +1,41 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Account } from "@/lib/accounts";
-import type { Comment, Post, PostAction } from "@/lib/posts";
+import type { Comment, Post, PostAction, Slide } from "@/lib/posts";
+import { looksLikeId } from "@/lib/names";
+import { LIMITS, MAX_POINTS, slideLabel, starterSlides } from "@/lib/slides";
+import { POSTING_WINDOWS, WINDOW_KEYS } from "@/lib/slots";
 import { findTells } from "@/lib/tells";
+import { timeZoneOptions } from "@/lib/time";
+import { carouselPalette, DEFAULT_CAROUSEL_COLOR } from "@/lib/colors";
+import { combineNotes, postingStatus, type JobRun } from "@/lib/explain";
+import { needsReconnect, todos, type Todo } from "@/lib/todo";
 
 type State = {
-  workspace: { id: string; name: string; timezone: string; voice: string; github_repo: string | null };
+  workspace: { id: string; name: string; timezone: string; voice: string; posting_windows: string[]; carousel_color: string | null };
   accounts: Account[];
   posts: Post[];
   comments: Comment[];
-  jobs: { job: string; started_at: string; ok: boolean | null; summary: string | null }[];
-  config: { linkedin: boolean; drafting: boolean; github: boolean };
+  jobs: JobRun[];
+  config: { linkedin: boolean; drafting: boolean; companyLogo: boolean };
 };
 
 const LINKEDIN_COMPOSE = "https://www.linkedin.com/feed/?shareActive=true";
 
 // ---------- helpers ----------
+/** Calls the app's API. Errors carry only plain messages: the server sends nothing technical, and these fallbacks aren't either. */
 async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, { ...init, headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers } });
+  let r: Response;
+  try {
+    r = await fetch(path, { ...init, headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers } });
+  } catch {
+    throw new Error("Couldn't reach Post Desk. Check your connection and try again.");
+  }
   const data = await r.json().catch(() => ({}));
   if (r.status === 401) { window.location.href = "/login"; throw new Error("Signed out"); }
-  if (!r.ok) throw new Error((data as { error?: string }).error || `Request failed (${r.status})`);
+  // The host rejects oversized uploads before the app sees them (on Vercel, around 4.5 MB), so say so.
+  if (r.status === 413) throw new Error("That file is too big to upload. Try a smaller PDF.");
+  if (!r.ok) throw new Error((data as { error?: string }).error || "Something went wrong. Try again in a minute.");
   return data as T;
 }
 const fmt = (iso: string, tz: string) => new Date(iso).toLocaleString("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -29,6 +44,10 @@ const dayKey = (d: Date, tz: string) => d.toLocaleDateString("en-CA", { timeZone
 function toLocalInput(iso: string) {
   const d = new Date(iso); const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+/** "Acme Coffee Roasters" → "AC". Stands in for a picture the app doesn't have. */
+function initials(name?: string | null) {
+  return (name || "?").split(/\s+/).filter(Boolean).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 }
 function firstLine(body: string) { return body.split("\n").find((l) => l.trim()) || ""; }
 function ago(iso: string | null) {
@@ -77,6 +96,7 @@ export default function Dashboard() {
     .sort((a, b) => +new Date(a.scheduled_for || 0) - +new Date(b.scheduled_for || 0));
   const posted = s.posts.filter((p) => p.status === "posted").sort((a, b) => +new Date(b.posted_at || 0) - +new Date(a.posted_at || 0));
   const unanswered = s.comments.filter((c) => !c.replied).length;
+  const todo = todos(s.posts, s.accounts);
   const expiring = s.accounts.filter((a) => a.connected && a.token_expires_at && +new Date(a.token_expires_at) - Date.now() < 7 * 86400000);
   const current = drafts[Math.min(idx, Math.max(0, drafts.length - 1))];
 
@@ -95,16 +115,17 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="stats">
-          {[[drafts.length, "to review"], [planned.length, "planned"], [posted.length, "posted"], ...(unanswered ? [[unanswered, "to answer"]] : [])].map(([v, l]) => (
+          {[...(todo.length ? [[todo.length, "to do"]] : []), [drafts.length, "to review"], [planned.length, "planned"], [posted.length, "posted"], ...(unanswered ? [[unanswered, "to answer"]] : [])].map(([v, l]) => (
             <div className="stat" key={String(l)}><b>{v}</b><span>{l}</span></div>
           ))}
         </div>
       </div>
 
       {banner && <div className={`banner ${banner.ok ? "" : "bad"}`}>{banner.text}</div>}
-      {!s.config.linkedin && <div className="banner warn">LinkedIn isn't configured yet, so posts are published by hand. Add your LinkedIn app keys to turn on auto-posting (see README).</div>}
+      {!s.config.linkedin && <div className="banner warn">Auto-posting isn't set up yet, so posts are published by hand for now.</div>}
       {expiring.map((a) => <div key={a.id} className="banner warn">The LinkedIn connection for {a.name} expires {fmt(a.token_expires_at!, tz)}. Reconnect it in Settings.</div>)}
-      {s.posts.some((p) => p.status === "failed") && <div className="banner bad">A post failed to publish. See Planned below.</div>}
+
+      <TodoList items={todo} tz={tz} act={act} copy={copy} />
 
       <Calendar s={s} tz={tz} onJump={(id) => { const k = drafts.findIndex((d) => d.id === id); if (k >= 0) { setIdx(k); document.getElementById("review")?.scrollIntoView({ behavior: "smooth" }); } }} />
 
@@ -123,7 +144,7 @@ export default function Dashboard() {
           </div>
         )}
         {s.config.drafting && (
-          <Generate s={s} busy={busy} setBusy={setBusy} say={say} reload={load} />
+          <Generate busy={busy} setBusy={setBusy} say={say} reload={load} />
         )}
       </section>
 
@@ -143,15 +164,16 @@ export default function Dashboard() {
                     {a && <span className={`chip ${a.kind === "person" ? "person" : ""}`}>{a.name}</span>}
                     {p.format === "document" && <span className="chip warn">Carousel</span>}
                     {p.status === "failed" ? <span className="chip bad">Failed</span> : p.status === "publishing" ? <span className="chip">Publishing…</span>
-                      : due ? <span className="chip warn">{auto ? "Publishing on the next run" : "Due now"}</span> : <span>{fmtTime(p.scheduled_for!, tz)} · {auto ? "posts automatically" : "post by hand"}</span>}
+                      : due ? <span className="chip warn">{auto ? "Publishing shortly" : "Due now"}</span> : <span>{fmtTime(p.scheduled_for!, tz)} · {auto ? "posts automatically" : "post by hand"}</span>}
                     {p.format === "document" && <a className="link go" href={`/api/posts/${p.id}/pdf`}>Download PDF</a>}
                   </div>
-                  {p.error && <div className="muted" style={{ color: "var(--bad)", marginTop: 4 }}>{p.error}</div>}
+                  <Problem text={p.problem} />
                   <div className="acts">
-                    {p.status === "failed" && <button className="link go" onClick={() => act(p.id, { action: "retry" }, "Will retry on the next run")}>Retry</button>}
-                    {!auto && <button className="link go" onClick={() => { copy(p.body, `Copied. Post it as ${a?.name || "the page"}.`); window.open(a?.kind === "organization" && a.profile_url ? a.profile_url : LINKEDIN_COMPOSE, "_blank", "noopener"); }}>Copy &amp; open LinkedIn</button>}
-                    {!auto && <MarkPosted id={p.id} act={act} />}
-                    {p.status === "planned" && <button className="link" onClick={() => act(p.id, { action: "unplan" }, "Moved back to review")}>Move back to review</button>}
+                    {p.status === "failed" ? <FixActions kind="post" p={p} a={a} act={act} copy={copy} /> : <>
+                      {!auto && <button className="link go" onClick={() => { copy(p.body, `Copied. Post it as ${a?.name || "the page"}.`); window.open(a?.kind === "organization" && a.profile_url ? a.profile_url : LINKEDIN_COMPOSE, "_blank", "noopener"); }}>Copy &amp; open LinkedIn</button>}
+                      {!auto && <MarkPosted id={p.id} act={act} />}
+                      {p.status === "planned" && <button className="link" onClick={() => act(p.id, { action: "unplan" }, "Moved back to review")}>Move back to review</button>}
+                    </>}
                   </div>
                 </div>
               </li>
@@ -184,6 +206,141 @@ function Tile({ iso, tz }: { iso: string; tz: string }) {
       <b>{d.toLocaleDateString("en-US", { timeZone: tz, day: "numeric" })}</b>
       <span>{d.toLocaleDateString("en-US", { timeZone: tz, month: "short" })}</span>
     </div>
+  );
+}
+
+type Act = (id: string, a: PostAction, msg?: string) => Promise<void>;
+type Copy = (text: string, msg: string) => Promise<void>;
+
+function TodoList({ items, tz, act, copy }: { items: Todo[]; tz: string; act: Act; copy: Copy }) {
+  if (!items.length) return null;
+  return (
+    <section id="todo">
+      <h2>To do <span className="count">{items.length}</span></h2>
+      <ul className="rows panel">
+        {items.map(({ kind, post: p, account: a, when }) => (
+          <li key={`${kind}-${p.id}`}>
+            <Tile iso={when} tz={tz} />
+            <div className="row-main">
+              <div className="row-text">{firstLine(p.body)}</div>
+              <div className="meta">
+                <span className="chip bad">{kind === "post" ? "Post" : "Reshare"}</span>
+                {a && <span className={`chip ${a.kind === "person" ? "person" : ""}`}>{a.name}</span>}
+                {!a && <span>{kind === "post" ? "Posting" : "Resharing"} account was removed</span>}
+              </div>
+              <Problem text={(kind === "post" ? p.problem : p.reshare_problem) ?? "This didn't go out as planned."} />
+              <div className="acts"><FixActions kind={kind} p={p} a={a} act={act} copy={copy} /></div>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * What you can do about a failed post or reshare, the same everywhere it appears. Reconnecting comes first when the
+ * account's token no longer works (a Retry would fail the same way); otherwise checking LinkedIn comes first, then
+ * recording what happened, and Retry last, because retrying something that did go out posts it twice.
+ */
+function FixActions({ kind, p, a, act, copy }: { kind: "post" | "reshare"; p: Post; a: Account | null; act: Act; copy: Copy }) {
+  const reconnect = needsReconnect(a);
+  return (
+    <>
+      {reconnect && a && <a className="link go" href={`/api/auth/linkedin/start?kind=${a.kind}`} title={`Reconnect ${a.name}; Retry comes back once it's connected`}>Reconnect to retry</a>}
+      {a?.profile_url && <a className="link go" href={a.profile_url} target="_blank" rel="noopener noreferrer" title={`Open ${a.name} on LinkedIn`}>Check on LinkedIn ↗</a>}
+      {kind === "reshare" && p.url && <OpenForReshare p={p} copy={copy} />}
+      {kind === "post" ? <MarkPosted id={p.id} act={act} />
+        : <button className="link" onClick={() => act(p.id, { action: "markReshared" }, "Marked shared")}>Mark shared</button>}
+      {a && !reconnect && <button className="link" onClick={() => act(p.id, { action: "retry" }, "Will try again shortly")}>Retry</button>}
+    </>
+  );
+}
+
+/** Why a post or reshare didn't go out, in plain words (worked out on the server; see explain.ts). */
+function Problem({ text }: { text: string | null | undefined }) {
+  if (!text) return null;
+  return <div className="muted" style={{ color: "var(--bad)", marginTop: 4 }}>{text}</div>;
+}
+
+/**
+ * An account's name in Settings, with Rename. The chosen name is used everywhere, including the top of carousel slides.
+ * Accounts saved by ID before names were checked show "Name missing" until renamed.
+ */
+function AccountName({ a, say, reload }: { a: Account; say: (m: string) => void; reload: () => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const missing = a.name_missing;
+  async function save(name: string) {
+    try {
+      await api(`/api/accounts/${a.id}`, { method: "PATCH", body: JSON.stringify({ display_name: name }) });
+      setEditing(false); say(name.trim() ? "Renamed" : "Back to the original name"); await reload();
+    } catch (e) { say((e as Error).message); }
+  }
+  if (editing) {
+    return (
+      <span className="inline">
+        <input autoFocus aria-label="Account name" value={value} placeholder="The name people know it by"
+          onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save(value)} />
+        <button className="secondary" onClick={() => save(value)}>Save</button>
+        <button className="link" onClick={() => setEditing(false)}>Cancel</button>
+      </span>
+    );
+  }
+  const original = a.display_name && !looksLikeId(a.linkedin_name) ? a.linkedin_name : null;
+  return (
+    <>
+      <b style={missing ? { color: "var(--bad)" } : undefined}>{missing ? "Name missing" : a.name}</b>
+      <button className={`link${missing ? " go" : ""}`} onClick={() => { setValue(missing ? "" : a.name); setEditing(true); }}>Rename</button>
+      {original && <button className="link" title={`Originally “${original}”`} onClick={() => save("")}>Undo rename</button>}
+    </>
+  );
+}
+
+/**
+ * The carousel color, with a preview of the colors slides will use, including any adjustment made to keep text readable
+ * (see carouselPalette), so nobody is surprised by the PDF.
+ */
+function CarouselColor({ value, onChange }: { value: string | null; onChange: (c: string | null) => void }) {
+  const p = carouselPalette(value);
+  return (
+    <div className="field"><span>Carousel color</span>
+      <div className="inline" style={{ alignItems: "center" }}>
+        <input type="color" aria-label="Carousel color" value={value ?? DEFAULT_CAROUSEL_COLOR} onChange={(e) => onChange(e.target.value)}
+          style={{ width: 44, height: 34, padding: 2 }} />
+        <span className="swatches" aria-label="How slides will look">
+          <span style={{ background: p.dark, color: p.onDarkTitle }}>Aa</span>
+          <span style={{ background: p.tint, color: p.ink }}>Aa</span>
+          <span style={{ background: p.paper, color: p.ink, border: `1px solid ${p.line}` }}>Aa</span>
+        </span>
+        {value ? <button className="link" onClick={() => onChange(null)}>Use neutral</button> : <span className="muted">Neutral</span>}
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>Used for carousels built from slides. Text turns light or dark to suit the color, and a few in-between colors are deepened slightly, so slides stay easy to read.</div>
+    </div>
+  );
+}
+
+/** Time zone picker: cities with their UTC offset, grouped by region. A text field only if the browser can't list zones. */
+function TimeZoneSelect({ value, onChange }: { value: string; onChange: (tz: string) => void }) {
+  const groups = useMemo(() => timeZoneOptions(value), [value]);
+  if (!groups.length) return <input value={value} onChange={(e) => onChange(e.target.value)} />;
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      {groups.map((g) => (
+        <optgroup key={g.region} label={g.region}>
+          {g.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
+/** Opens the company post to reshare it by hand, copying the personal note first. */
+function OpenForReshare({ p, copy }: { p: Post; copy: Copy }) {
+  return (
+    <button className="link go" onClick={() => { if (p.share_note) copy(p.share_note, "Note copied"); window.open(p.url!, "_blank", "noopener"); }}>
+      {p.share_note ? "Copy note & open post" : "Open post"}
+    </button>
   );
 }
 
@@ -232,6 +389,7 @@ function DraftCard({ post, s, tz, say, reload, act }: {
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState("");
   const [working, setWorking] = useState(false);
+  const [editingSlides, setEditingSlides] = useState<Slide[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const tells = findTells(body);
   const a = s.accounts.find((x) => x.id === accountId) || null;
@@ -239,6 +397,7 @@ function DraftCard({ post, s, tz, say, reload, act }: {
   async function save() { if (body !== post.body) await act(post.id, { action: "edit", fields: { body } }); }
 
   async function approve() {
+    if (editingSlides) { say("Save or cancel your slide changes first."); return; }
     if (tells.length && armed !== "approve") { setArmed("approve"); return; }
     await act(post.id, { action: "approve", scheduledFor: new Date(when).toISOString(), body, accountId: accountId || null },
       `Planned for ${fmt(new Date(when).toISOString(), tz)}`);
@@ -263,7 +422,7 @@ function DraftCard({ post, s, tz, say, reload, act }: {
     <article className="panel post">
       <div className="post-head">
         <div className={`avatar ${a?.kind === "organization" ? "org" : ""}`}>
-          {a?.kind === "organization" ? <img src="/logo-mark.svg" alt="" /> : (a?.name || "?").split(" ").map((w) => w[0]).join("").slice(0, 2)}
+          {a?.kind === "organization" && s.config.companyLogo ? <img src="/logo-mark.png" alt="" /> : initials(a?.name)}
         </div>
         <div className="who">
           <div className="name">
@@ -273,7 +432,7 @@ function DraftCard({ post, s, tz, say, reload, act }: {
               {s.accounts.map((x) => <option key={x.id} value={x.id}>{x.name} ({x.kind === "organization" ? "page" : "profile"})</option>)}
             </select>
           </div>
-          <div className="sub">{post.topic}{post.source === "github" ? " · from what you shipped" : ""}{post.status === "revise" ? " · waiting on a rewrite" : ""}</div>
+          <div className="sub">{post.topic}{post.status === "revise" ? " · waiting on a rewrite" : ""}</div>
         </div>
       </div>
       <textarea className="body" aria-label="Post text" value={body} onChange={(e) => setBody(e.target.value)} onBlur={save} />
@@ -281,10 +440,21 @@ function DraftCard({ post, s, tz, say, reload, act }: {
         <div className="meta" style={{ padding: "0 20px 12px" }}>
           <span className="chip warn">Carousel</span>
           <span>{post.doc_title}</span>
-          <a className="link go" href={`/api/posts/${post.id}/pdf`}>{post.attachment_id ? "Download PDF" : "Preview PDF"}</a>
+          {(post.slides?.length || post.attachment_id) && (
+            <a className="link go" href={`/api/posts/${post.id}/pdf`}>{post.attachment_id ? "Download PDF" : "Preview PDF"}</a>
+          )}
+          {!editingSlides && (
+            <button className="link go" onClick={() => setEditingSlides(post.slides?.length ? post.slides : starterSlides(post.topic, body))}>
+              {post.slides?.length ? "Edit slides" : "Write slides"}
+            </button>
+          )}
           <button className="link" onClick={() => fileRef.current?.click()}>Upload your own PDF</button>
           <input ref={fileRef} type="file" accept="application/pdf" hidden onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
         </div>
+      )}
+      {editingSlides && (
+        <SlideEditor post={post} initial={editingSlides} usesUpload={Boolean(post.attachment_id)} act={act} say={say}
+          onClose={() => setEditingSlides(null)} />
       )}
       {post.note && <p className="flag">{post.note}</p>}
       {tells.length > 0 && <p className="flag">Reads like AI: {tells.join(", ")}</p>}
@@ -293,6 +463,9 @@ function DraftCard({ post, s, tz, say, reload, act }: {
         <input type="datetime-local" aria-label="Post on" value={when} onChange={(e) => setWhen(e.target.value)} />
         <button className="primary" onClick={approve}>{armed === "approve" ? "Approve anyway" : "Approve & plan"}</button>
         <span className="grow" />
+        {post.format !== "document" && !editingSlides && (
+          <button className="link" onClick={() => setEditingSlides(post.slides?.length ? post.slides : starterSlides(post.topic, body))}>Make it a carousel</button>
+        )}
         <button className="link" onClick={() => setNoteOpen(true)}>Rewrite</button>
         <button className="link" onClick={() => armed === "reject" ? act(post.id, { action: "reject" }, "Rejected") : setArmed("reject")}>
           {armed === "reject" ? "Confirm reject" : "Reject"}
@@ -305,6 +478,119 @@ function DraftCard({ post, s, tz, say, reload, act }: {
         </div>
       )}
     </article>
+  );
+}
+
+/**
+ * Edits a carousel's slides: a cover, numbered points (add, remove, reorder, optional quote) and a closing slide.
+ * Saving switches the post to a carousel built from these slides. The post text above becomes its caption.
+ */
+function SlideEditor({ post, initial, usesUpload, act, say, onClose }: {
+  post: Post; initial: Slide[]; usesUpload: boolean; act: Act; say: (m: string) => void; onClose: () => void;
+}) {
+  const [slides, setSlides] = useState<Slide[]>(initial);
+  const [deck, setDeck] = useState(post.doc_title || post.topic);
+  const [quoteOpen, setQuoteOpen] = useState<number[]>([]);
+  const points = slides.filter((x) => x.kind === "point").length;
+  const update = (i: number, patch: Partial<Slide>) => setSlides(slides.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  const move = (i: number, by: -1 | 1) => {
+    const next = [...slides];
+    [next[i], next[i + by]] = [next[i + by], next[i]];
+    setSlides(next);
+    setQuoteOpen([]); // opened-but-empty quote boxes would otherwise stay at the old position
+  };
+  const remove = (i: number) => { setSlides(slides.filter((_, j) => j !== i)); setQuoteOpen([]); };
+  const addPoint = () => setSlides([...slides.slice(0, -1), { kind: "point", title: "" }, slides[slides.length - 1]]);
+  const placeholder: Record<Slide["kind"], [string, string]> = {
+    cover: ["What's this carousel about?", "One line under the title (optional)"],
+    point: ["The point, in a few words", "A sentence or two (optional)"],
+    end: ["A question or takeaway to finish on", "A line under it (optional)"],
+  };
+
+  async function save() {
+    await act(post.id, { action: "setSlides", slides, docTitle: deck }, "Slides saved");
+  }
+  /** Opens the PDF for the slides as they are now, saved or not. */
+  async function preview() {
+    const tab = window.open("", "_blank"); // opened right away, so the browser doesn't block it as a pop-up
+    const fail = (m: string) => { tab?.close(); say(m); };
+    try {
+      const r = await fetch(`/api/posts/${post.id}/preview`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slides, docTitle: deck }),
+      });
+      if (r.status === 401) { tab?.close(); window.location.href = "/login"; return; }
+      if (!r.ok) return fail(((await r.json().catch(() => ({}))) as { error?: string }).error || "Couldn't make the preview. Try again in a minute.");
+      const url = URL.createObjectURL(await r.blob());
+      if (!tab) { window.open(url, "_blank"); return; }
+      // Show it in a page with a readable tab title, rather than the PDF's random address.
+      tab.document.title = `Preview: ${deck || post.topic}`;
+      tab.document.body.style.margin = "0";
+      const frame = tab.document.createElement("iframe");
+      frame.src = url;
+      frame.title = "Carousel preview";
+      frame.style.cssText = "border:0;width:100vw;height:100vh;display:block";
+      tab.document.body.appendChild(frame);
+    } catch {
+      fail("Couldn't reach Post Desk. Check your connection and try again.");
+    }
+  }
+  async function makeTextPost() {
+    await act(post.id, { action: "setSlides", slides: null }, "Now a text post");
+  }
+
+  return (
+    <div className="slides-editor">
+      {slides.map((sl, i) => {
+        const tells = findTells(`${sl.title}\n${sl.body ?? ""}\n${sl.quote ?? ""}`);
+        const showQuote = sl.kind === "point" && (Boolean(sl.quote) || quoteOpen.includes(i));
+        return (
+          <div className="slide-edit" key={i}>
+            <div className="slide-head">
+              <b>{slideLabel(slides, i)}</b>
+              {sl.kind === "point" && (
+                <span className="slide-tools">
+                  <button className="link" disabled={slides[i - 1]?.kind !== "point"} onClick={() => move(i, -1)} aria-label="Move up">↑</button>
+                  <button className="link" disabled={slides[i + 1]?.kind !== "point"} onClick={() => move(i, 1)} aria-label="Move down">↓</button>
+                  {points > 1 && <button className="link" onClick={() => remove(i)}>Remove</button>}
+                </span>
+              )}
+            </div>
+            <input aria-label={`${slideLabel(slides, i)} title`} placeholder={placeholder[sl.kind][0]} maxLength={LIMITS.title}
+              value={sl.title} onChange={(e) => update(i, { title: e.target.value })} />
+            <textarea aria-label={`${slideLabel(slides, i)} text`} placeholder={placeholder[sl.kind][1]} maxLength={LIMITS.body} rows={2}
+              value={sl.body ?? ""} onChange={(e) => update(i, { body: e.target.value })} />
+            {showQuote && (
+              <div className="inline" style={{ marginTop: 0 }}>
+                <input aria-label="Quote" placeholder="A short quote (optional)" maxLength={LIMITS.quote}
+                  value={sl.quote ?? ""} onChange={(e) => update(i, { quote: e.target.value })} />
+                <input aria-label="Who said it" placeholder="Who said it, or where" maxLength={LIMITS.quoteLabel} style={{ maxWidth: 200 }}
+                  value={sl.quoteLabel ?? ""} onChange={(e) => update(i, { quoteLabel: e.target.value })} />
+              </div>
+            )}
+            {sl.kind === "point" && !showQuote && (
+              <button className="link" style={{ justifySelf: "start" }} onClick={() => setQuoteOpen([...quoteOpen, i])}>Add a quote</button>
+            )}
+            {tells.length > 0 && <p className="flag" style={{ margin: 0 }}>Reads like AI: {tells.join(", ")}</p>}
+          </div>
+        );
+      })}
+      <div className="acts">
+        {points < MAX_POINTS && <button className="link go" onClick={addPoint}>Add a point</button>}
+      </div>
+      <label className="field" style={{ marginTop: 8 }}><span>Deck title (bottom of each slide)</span>
+        <input maxLength={LIMITS.deck} value={deck} onChange={(e) => setDeck(e.target.value)} /></label>
+      <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+        The post text above is the caption people read before they swipe.
+        {usesUpload ? " Saving these slides replaces your uploaded PDF." : ""}
+      </p>
+      <div className="acts" style={{ marginTop: 10 }}>
+        <button className="primary" onClick={save}>Save slides</button>
+        <button className="secondary" onClick={preview}>Preview</button>
+        <button className="link" onClick={onClose}>Cancel</button>
+        <span className="grow" />
+        {post.format === "document" && <button className="link" onClick={makeTextPost}>Make it a text post</button>}
+      </div>
+    </div>
   );
 }
 
@@ -355,16 +641,14 @@ function PostedRow({ p, s, tz, act, copy, reload, say }: {
           <div className="box share">
             <div className="box-h">Reshare from {ra.name}</div>
             {p.share_note && <div>“{p.share_note}”</div>}
-            {p.reshare_status === "failed" && <div className="muted" style={{ color: "var(--bad)" }}>{p.reshare_error}</div>}
+            {p.reshare_status === "failed" && <Problem text={p.reshare_problem} />}
             <div className="acts">
-              {isApi(ra) && p.reshare_status === "pending" && p.reshare_at && <span className="muted">Reshares automatically {fmt(p.reshare_at, tz)}</span>}
-              {p.reshare_status === "failed" && <button className="link go" onClick={() => act(p.id, { action: "retry" }, "Will retry")}>Retry</button>}
-              {(!isApi(ra) || p.reshare_status === "failed") && p.url && (
-                <button className="link go" onClick={() => { if (p.share_note) copy(p.share_note, "Note copied"); window.open(p.url!, "_blank", "noopener"); }}>
-                  {p.share_note ? "Copy note & open post" : "Open post"}
-                </button>
-              )}
-              {(!isApi(ra) || p.reshare_status === "failed") && <button className="link" onClick={() => act(p.id, { action: "markReshared" }, "Marked shared")}>Mark shared</button>}
+              {p.reshare_status === "failed" ? <FixActions kind="reshare" p={p} a={ra ?? null} act={act} copy={copy} /> : <>
+                {isApi(ra) && p.reshare_status === "pending" && p.reshare_at && <span className="muted">Reshares automatically {fmt(p.reshare_at, tz)}</span>}
+                {p.reshare_status === "resharing" && <span className="muted">Resharing…</span>}
+                {!isApi(ra) && p.url && <OpenForReshare p={p} copy={copy} />}
+                {!isApi(ra) && <button className="link" onClick={() => act(p.id, { action: "markReshared" }, "Marked shared")}>Mark shared</button>}
+              </>}
             </div>
             {!isApi(ra) && <div className="muted" style={{ fontSize: 12 }}>On the post: Repost → Repost with your thoughts → paste.</div>}
           </div>
@@ -386,14 +670,14 @@ function PostedRow({ p, s, tz, act, copy, reload, say }: {
   );
 }
 
-function Generate({ s, busy, setBusy, say, reload }: { s: State; busy: boolean; setBusy: (b: boolean) => void; say: (m: string) => void; reload: () => Promise<void> }) {
+function Generate({ busy, setBusy, say, reload }: { busy: boolean; setBusy: (b: boolean) => void; say: (m: string) => void; reload: () => Promise<void> }) {
   const [count, setCount] = useState(3);
   const [brief, setBrief] = useState("");
-  async function run(fromGithub = false) {
+  async function run() {
     setBusy(true);
     try {
-      const r = await api<{ created: number; message?: string }>("/api/drafts/generate", { method: "POST", body: JSON.stringify({ count, brief, fromGithub }) });
-      say(r.message || `Added ${r.created} draft${r.created === 1 ? "" : "s"}`); setBrief(""); await reload();
+      const r = await api<{ created: number }>("/api/drafts/generate", { method: "POST", body: JSON.stringify({ count, brief }) });
+      say(`Added ${r.created} draft${r.created === 1 ? "" : "s"}`); setBrief(""); await reload();
     } catch (e) { say((e as Error).message); } finally { setBusy(false); }
   }
   return (
@@ -401,21 +685,21 @@ function Generate({ s, busy, setBusy, say, reload }: { s: State; busy: boolean; 
       <select aria-label="How many drafts" value={count} onChange={(e) => setCount(Number(e.target.value))}>
         {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} draft{n > 1 ? "s" : ""}</option>)}
       </select>
-      <input placeholder="Optional direction, e.g. a carousel about staffing" value={brief} onChange={(e) => setBrief(e.target.value)} />
-      <button className="primary" disabled={busy} onClick={() => run(false)}>{busy ? "Writing…" : "Generate"}</button>
-      {s.config.github && <button className="secondary" disabled={busy} onClick={() => run(true)}>From this week's work</button>}
+      <input placeholder="Optional direction, e.g. a carousel about a recent project" value={brief} onChange={(e) => setBrief(e.target.value)} />
+      <button className="primary" disabled={busy} onClick={run}>{busy ? "Writing…" : "Generate"}</button>
     </div>
   );
 }
 
 function Settings({ s, say, reload }: { s: State; say: (m: string) => void; reload: () => Promise<void> }) {
   const [voice, setVoice] = useState(s.workspace.voice);
-  const [repo, setRepo] = useState(s.workspace.github_repo || "");
   const [tzv, setTz] = useState(s.workspace.timezone);
+  const [windows, setWindows] = useState<string[]>(s.workspace.posting_windows);
+  const [color, setColor] = useState<string | null>(s.workspace.carousel_color);
   const [manual, setManual] = useState({ kind: "organization" as "organization" | "person", name: "", profile_url: "" });
 
   async function saveWs() {
-    try { await api("/api/settings", { method: "PUT", body: JSON.stringify({ voice, github_repo: repo, timezone: tzv }) }); say("Saved"); await reload(); }
+    try { await api("/api/settings", { method: "PUT", body: JSON.stringify({ voice, timezone: tzv, posting_windows: windows, carousel_color: color }) }); say("Saved"); await reload(); }
     catch (e) { say((e as Error).message); }
   }
   async function patchAcct(id: string, body: object) {
@@ -428,9 +712,17 @@ function Settings({ s, say, reload }: { s: State; say: (m: string) => void; relo
     try { await api("/api/accounts/manual", { method: "POST", body: JSON.stringify(manual) }); setManual({ ...manual, name: "", profile_url: "" }); await reload(); }
     catch (e) { say((e as Error).message); }
   }
+  const posting = postingStatus(s.jobs);
   async function runJob(job: string) {
-    try { const r = await api<Record<string, { summary: string }>>(`/api/cron/${job}`, { method: "POST" }); say(Object.values(r).map((x) => x.summary).join(" · ")); await reload(); }
-    catch (e) { say((e as Error).message); }
+    // A failed run answers 500 with each job's note, so read the body rather than treating it as a request error.
+    try {
+      const r = await fetch(`/api/cron/${job}`, { method: "POST" });
+      if (r.status === 401) { window.location.href = "/login"; return; }
+      const data = (await r.json().catch(() => null)) as Record<string, { note?: string }> | null;
+      const notes = data && !("error" in data) ? Object.values(data).map((x) => x.note) : [];
+      say(notes.length ? combineNotes(notes) : "Couldn't check right now. Try again in a minute.");
+      await reload();
+    } catch { say("Couldn't run it. Try again in a minute."); }
   }
 
   return (
@@ -439,18 +731,33 @@ function Settings({ s, say, reload }: { s: State; say: (m: string) => void; relo
 
       <label className="field"><span>Voice and audience notes (used for every draft)</span>
         <textarea value={voice} onChange={(e) => setVoice(e.target.value)} /></label>
-      <label className="field"><span>GitHub repo for "what we shipped" drafts</span>
-        <input placeholder="owner/repo" value={repo} onChange={(e) => setRepo(e.target.value)} /></label>
       <label className="field"><span>Time zone</span>
-        <input value={tzv} onChange={(e) => setTz(e.target.value)} /></label>
+        <TimeZoneSelect value={tzv} onChange={setTz} /></label>
+      <div className="field"><span>Usual posting times</span>
+        <div className="windows">
+          {WINDOW_KEYS.map((k) => (
+            <label key={k} className="window">
+              <input type="checkbox" checked={windows.includes(k)}
+                onChange={(e) => setWindows(e.target.checked ? [...windows, k] : windows.filter((w) => w !== k))} />
+              {POSTING_WINDOWS[k].label} <span className="muted">{POSTING_WINDOWS[k].hint}</span>
+            </label>
+          ))}
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>New drafts get a suggested time in one of these, 2–3 days apart, at an uneven minute so it doesn't look scheduled.</div>
+      </div>
+      <CarouselColor value={color} onChange={setColor} />
       <div className="acts" style={{ marginTop: 12 }}><button className="primary" onClick={saveWs}>Save settings</button></div>
 
       <div className="field"><span>LinkedIn accounts</span>
         {s.accounts.map((a) => (
           <div className="acct" key={a.id}>
             <span className={`chip ${a.kind === "person" ? "person" : ""}`}>{a.kind === "organization" ? "Page" : "Profile"}</span>
-            <b>{a.name}</b>
-            <span className="muted">{isApi(a) ? `auto-posting · expires ${new Date(a.token_expires_at!).toLocaleDateString()}` : a.urn.startsWith("manual:") ? "posted by hand" : "disconnected"}</span>
+            <AccountName a={a} say={say} reload={reload} />
+            <span className="muted" style={needsReconnect(a) && a.connected ? { color: "var(--bad)" } : undefined}>
+              {needsReconnect(a) ? (a.connected ? "needs reconnecting" : "disconnected")
+                : isApi(a) ? `auto-posting · expires ${new Date(a.token_expires_at!).toLocaleDateString()}` : "posted by hand"}
+            </span>
+            {needsReconnect(a) && <a className="link go" href={`/api/auth/linkedin/start?kind=${a.kind}`}>Reconnect</a>}
             <span className="grow" />
             {a.kind === "organization" && (a.is_default ? <span className="muted">Default for posts</span> : <button className="link" onClick={() => patchAcct(a.id, { makeDefault: true })}>Make default</button>)}
             {a.kind === "person" && (a.is_reshare_default ? <span className="muted">Default for reshares</span> : <button className="link" onClick={() => patchAcct(a.id, { makeReshareDefault: true })}>Use for reshares</button>)}
@@ -473,18 +780,16 @@ function Settings({ s, say, reload }: { s: State; say: (m: string) => void; relo
         </div>
       </div>
 
-      <div className="field"><span>Automation</span>
-        {["publish", "reshare", "comments", "autofill", "weekly-draft"].map((j) => {
-          const r = s.jobs.find((x) => x.job === j);
-          return (
-            <div className="acct" key={j}>
-              <b style={{ minWidth: 110 }}>{j}</b>
-              <span className="muted" style={{ flex: 1, minWidth: 0 }}>{r ? `${ago(r.started_at)} ago · ${r.ok === false ? "failed: " : ""}${r.summary || ""}` : "hasn't run yet"}</span>
-              <button className="link go" onClick={() => runJob(j)}>Run now</button>
-            </div>
-          );
-        })}
-      </div>
+      {s.accounts.some(isApi) && (
+        <div className="field"><span>Automatic posting</span>
+          <div className="acct">
+            <span className="muted" style={{ flex: 1, minWidth: 0, ...(posting.bad ? { color: "var(--bad)" } : {}) }}>
+              {posting.at ? `Checked ${ago(posting.at)} ago · ` : ""}{posting.text}
+            </span>
+            <button className="link go" onClick={() => runJob("all")}>Check now</button>
+          </div>
+        </div>
+      )}
       <div className="acts" style={{ marginTop: 16 }}>
         <button className="link" onClick={async () => { await fetch("/api/logout", { method: "POST" }); window.location.href = "/login"; }}>Sign out</button>
       </div>

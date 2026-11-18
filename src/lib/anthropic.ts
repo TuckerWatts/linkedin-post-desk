@@ -1,8 +1,9 @@
 // Minimal Claude Messages API client (no SDK dependency).
 import { env } from "./env";
+import { UserError } from "./errors";
 
 export async function claude(system: string, user: string, maxTokens = 4000): Promise<string> {
-  if (!env.anthropic.apiKey) throw new Error("Set ANTHROPIC_API_KEY to generate drafts.");
+  if (!env.anthropic.apiKey) throw new UserError("Drafting isn't set up yet.");
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {

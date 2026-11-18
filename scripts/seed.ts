@@ -1,4 +1,4 @@
-// Imports the posts planned in the Claude Post Desk artifact (seed/example.json) into an empty database.
+// Imports the sample posts in seed/example.json into an empty database.
 //   npm run db:seed
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -7,7 +7,7 @@ import { Client } from "pg";
 type SeedPost = {
   key: string; status: string; account: string | null; topic: string; body: string; shareNote: string | null;
   scheduledFor: string | null; suggestedFor: string | null; postedAt: string | null; url: string | null;
-  format: string | null; attachment: string | null; docTitle: string | null; sourceRefs: string[] | null;
+  format: string | null; attachment: string | null; docTitle: string | null;
 };
 type Seed = { voice: string; accounts: { id: string; kind: string; name: string; url: string }[]; posts: SeedPost[] };
 
@@ -23,8 +23,8 @@ async function main() {
 
   let ws = (await c.query("SELECT id FROM workspaces ORDER BY created_at LIMIT 1")).rows[0];
   if (!ws) {
-    ws = (await c.query("INSERT INTO workspaces (name, timezone, voice, github_repo) VALUES ($1,$2,$3,$4) RETURNING id",
-      [process.env.WORKSPACE_NAME || "Acme Coffee Roasters", process.env.TIMEZONE || "America/New_York", seed.voice, process.env.GITHUB_REPO || null])).rows[0];
+    ws = (await c.query("INSERT INTO workspaces (name, timezone, voice) VALUES ($1,$2,$3) RETURNING id",
+      [process.env.WORKSPACE_NAME || "Acme Coffee Roasters", process.env.TIMEZONE || "America/New_York", seed.voice])).rows[0];
   }
   const existing = (await c.query("SELECT count(*)::int AS n FROM posts WHERE workspace_id = $1", [ws.id])).rows[0].n;
   if (existing > 0) { console.log(`Workspace already has ${existing} posts; skipping import.`); await c.end(); return; }
@@ -54,11 +54,11 @@ async function main() {
     const status = STATUS[p.status] || "draft";
     await c.query(
       `INSERT INTO posts (workspace_id, account_id, reshare_account_id, status, topic, body, share_note, format, doc_title, attachment_id,
-                          suggested_for, scheduled_for, posted_at, url, source, source_refs)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'import',$15)`,
+                          suggested_for, scheduled_for, posted_at, url, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'import')`,
       [ws.id, accountIds[p.account || "company"] ?? null, accountIds[p.account || "company"] === personId ? null : personId, status,
        (p.topic || "").replace(/\s*\(carousel\)$/i, ""), p.body, p.shareNote, p.attachment ? "document" : "text", p.docTitle, attachmentId,
-       p.suggestedFor, status === "planned" ? p.scheduledFor : null, p.postedAt, p.url, p.sourceRefs ?? []]);
+       p.suggestedFor, status === "planned" ? p.scheduledFor : null, p.postedAt, p.url]);
   }
   console.log(`Imported ${seed.posts.length} posts and ${seed.accounts.length} accounts.`);
   await c.end();

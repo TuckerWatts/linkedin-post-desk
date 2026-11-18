@@ -83,7 +83,8 @@ export async function getUserInfo(token: string): Promise<UserInfo> {
   return JSON.parse(text) as UserInfo;
 }
 
-export type Org = { urn: string; name: string; vanityName?: string };
+/** name is null when LinkedIn didn't tell us the page's name; it's never replaced by the page's ID. */
+export type Org = { urn: string; name: string | null; vanityName?: string };
 
 /** Pages where the connected member is an approved ADMINISTRATOR. */
 export async function getAdminOrganizations(token: string): Promise<Org[]> {
@@ -96,10 +97,10 @@ export async function getAdminOrganizations(token: string): Promise<Org[]> {
     const id = urn.split(":").pop();
     try {
       const r = await call(token, `/rest/organizations/${id}`);
-      const o = (await r.json()) as { localizedName?: string; vanityName?: string };
-      orgs.push({ urn, name: o.localizedName || urn, vanityName: o.vanityName });
+      const o = r.ok ? ((await r.json()) as { localizedName?: string; vanityName?: string }) : {};
+      orgs.push({ urn, name: o.localizedName?.trim() || null, vanityName: o.vanityName });
     } catch {
-      orgs.push({ urn, name: urn });
+      orgs.push({ urn, name: null });
     }
   }
   return orgs;
@@ -143,9 +144,47 @@ export async function createPost(token: string, input: PostInput): Promise<strin
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(buildPostBody(input)),
   });
+  if (!res.ok) throw new LinkedInError(`LinkedIn POST /rest/posts failed (${res.status})`, res.status, (await res.text()).slice(0, 2000));
   const urn = res.headers.get("x-restli-id") || res.headers.get("x-linkedin-id");
+  // A 2xx status: LinkedIn created the post. mayHaveCreated() relies on this error keeping that status.
   if (!urn) throw new LinkedInError("LinkedIn created the post but returned no id", res.status, "");
   return urn;
+}
+
+/** Network errors raised before a connection existed, so no request can have reached LinkedIn. */
+const NEVER_CONNECTED = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+
+function codeOf(e: unknown): string | undefined {
+  const c = (e as { code?: unknown } | null)?.code;
+  return typeof c === "string" ? c : undefined;
+}
+
+function neverConnected(e: unknown): boolean {
+  // fetch() rejects with TypeError("fetch failed") and the socket error as its cause.
+  const cause = (e as { cause?: unknown } | null)?.cause ?? e;
+  if (cause instanceof AggregateError) {
+    return cause.errors.length > 0 && cause.errors.every((x) => NEVER_CONNECTED.has(codeOf(x) ?? ""));
+  }
+  return NEVER_CONNECTED.has(codeOf(cause) ?? "");
+}
+
+/** A failure to talk to LinkedIn at all (no HTTP answer), as opposed to LinkedIn answering with an error. */
+export function isNetworkError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (e.name === "TimeoutError" || e.name === "AbortError") return true;
+  // fetch() rejects with TypeError("fetch failed"), or "terminated" if the connection drops mid-response.
+  return e instanceof TypeError && (e.message === "fetch failed" || e.message === "terminated");
+}
+
+/**
+ * After createPost fails: could LinkedIn have created the post anyway? Yes if LinkedIn answered 2xx without an id;
+ * if a gateway in front of LinkedIn gave up or got a broken answer (502, 504), like a timeout; or if the connection
+ * failed once the request may have gone out (closed, reset, timed out waiting, or anything unrecognised). No if
+ * LinkedIn itself answered with an error, or no connection was ever made.
+ */
+export function mayHaveCreated(e: unknown): boolean {
+  if (e instanceof LinkedInError) return (e.status >= 200 && e.status < 300) || e.status === 502 || e.status === 504;
+  return !neverConnected(e);
 }
 
 export function postUrl(urn: string): string {

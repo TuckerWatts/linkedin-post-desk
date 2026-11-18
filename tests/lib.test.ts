@@ -10,7 +10,7 @@ import { extractJson } from "../src/lib/anthropic";
 const TZ = "America/New_York";
 
 test("findTells flags em dashes, buzzwords, links and hashtag spam", () => {
-  assert.deepEqual(findTells("Pickup is about four seconds long."), []);
+  assert.deepEqual(findTells("The new roast takes about four minutes longer."), []);
   const t = findTells("We're excited to announce a seamless journey — #a #b #c https://x.co");
   assert.ok(t.includes("em dashes"));
   assert.ok(t.includes('"excited to announce"'));
@@ -46,8 +46,8 @@ test("nextSlot is 2-3 days after the latest planned post, never Sunday, at a lis
 });
 
 test("toLittleText escapes reserved characters and keeps hashtags", () => {
-  assert.equal(toLittleText("Ratios (1:4) @ 5pm"), "Ratios \\(1:4\\) \\@ 5pm");
-  assert.equal(toLittleText("Go #childcare!"), "Go {hashtag|\\#|childcare}!");
+  assert.equal(toLittleText("Brew ratio (1:16) @ 5pm"), "Brew ratio \\(1:16\\) \\@ 5pm");
+  assert.equal(toLittleText("Go #coffee!"), "Go {hashtag|\\#|coffee}!");
   assert.equal(toLittleText("a_b*c"), "a\\_b\\*c");
 });
 
@@ -74,4 +74,43 @@ test("encrypt/decrypt and sign/unsign", () => {
 test("extractJson tolerates fences and prose", () => {
   assert.deepEqual(extractJson<number[]>("Sure:\n```json\n[1,2]\n```"), [1, 2]);
   assert.deepEqual(extractJson<{ a: string }>('Here {"a":"b}"} done'), { a: "b}" });
+});
+
+test("built-in drafting rules don't assume any particular business or audience", async () => {
+  const { BASE_RULES } = await import("../src/lib/drafting");
+  assert.doesNotMatch(BASE_RULES, /parent|famil|child|daycare|director|staff|fear|guilt/i);
+  assert.match(BASE_RULES, /voice and audience notes/i, "points the model at the workspace's own notes");
+  assert.match(BASE_RULES, /Don't assume anyone's gender/);
+});
+
+test("suggested times stay within the chosen times of day", async () => {
+  const { POSTING_WINDOWS, cleanWindows, nextSlot, slotTimes } = await import("../src/lib/slots");
+  const now = new Date("2026-10-08T15:00:00Z");
+  for (const windows of [["early"], ["evening"], ["morning", "afternoon"], ["midday"]] as const) {
+    const allowed = new Set(windows.flatMap((w) => POSTING_WINDOWS[w].times.map(([h, m]) => `${h}:${m}`)));
+    for (let i = 0; i < 40; i++) {
+      const p = zonedParts(nextSlot([], `seed-${i}`, TZ, now, slotTimes(windows)), TZ);
+      assert.ok(allowed.has(`${p.hour}:${p.minute}`), `${windows}: ${p.hour}:${p.minute}`);
+      assert.notEqual(p.minute % 30, 0);
+      assert.notEqual(p.weekday, 0, "never on a Sunday");
+    }
+  }
+  assert.deepEqual(slotTimes([]), slotTimes(), "nothing valid picked: the default (morning and midday)");
+  assert.deepEqual(slotTimes(["nonsense"]), slotTimes());
+  assert.ok(slotTimes().every(([h]) => h >= 8 && h < 14), "the default is business hours, not early morning");
+
+  assert.deepEqual(cleanWindows(["evening", "early", "bogus"]), ["early", "evening"]);
+  assert.throws(() => cleanWindows([]), /Pick at least one time of day/);
+  assert.throws(() => cleanWindows("morning"), /Pick at least one time of day/);
+});
+
+test("time zone choices read as cities with their offset, grouped by region", async () => {
+  const { timeZoneOptions } = await import("../src/lib/time");
+  const groups = timeZoneOptions("America/New_York", new Date("2026-01-15T12:00:00Z"));
+  const america = groups.find((g) => g.region === "America")!;
+  assert.deepEqual(america.options.find((o) => o.value === "America/New_York"), { value: "America/New_York", label: "New York (GMT-5)" });
+  assert.ok(america.options.some((o) => o.label.startsWith("Buenos Aires")), "underscores become spaces");
+  assert.ok(groups.every((g) => g.options.every((o) => !o.label.includes("/") && !o.label.includes("_"))));
+  const odd = timeZoneOptions("Etc/GMT+5");
+  assert.ok(odd.some((g) => g.options.some((o) => o.value === "Etc/GMT+5")), "the saved zone is always offered");
 });

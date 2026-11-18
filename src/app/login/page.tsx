@@ -9,7 +9,12 @@ export default function Login() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true); setErr("");
-    const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
+    let r: Response;
+    try {
+      r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
+    } catch {
+      setBusy(false); setErr("Couldn't reach Post Desk. Check your connection and try again."); return;
+    }
     setBusy(false);
     if (r.ok) window.location.href = "/";
     else setErr((await r.json().catch(() => ({}))).error || "Couldn't sign in.");

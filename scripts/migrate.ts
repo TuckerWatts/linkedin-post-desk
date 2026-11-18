@@ -1,7 +1,9 @@
 // Applies db/migrations/*.sql in order, once each.  npm run db:migrate
+// To stop at a migration (e.g. when upgrading, see the README):  npm run db:migrate -- --to=009
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "pg";
+import { parseTo, planMigrations } from "./migration-plan";
 
 async function main() {
   const url = process.env.DATABASE_URL;
@@ -12,8 +14,8 @@ async function main() {
   await c.query("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
   const done = new Set((await c.query("SELECT name FROM schema_migrations")).rows.map((r) => r.name));
   const dir = join(process.cwd(), "db", "migrations");
-  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
-    if (done.has(f)) continue;
+  const { apply, held } = planMigrations(readdirSync(dir), done, parseTo(process.argv.slice(2)));
+  for (const f of apply) {
     const sql = readFileSync(join(dir, f), "utf8");
     await c.query("BEGIN");
     try {
@@ -27,7 +29,8 @@ async function main() {
     }
   }
   await c.end();
-  console.log("migrations up to date");
+  if (held.length) console.log(`held back (run npm run db:migrate again to apply): ${held.join(", ")}`);
+  else console.log("migrations up to date");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

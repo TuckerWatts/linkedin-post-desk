@@ -1,4 +1,5 @@
 // Central place to read configuration. Throws with a clear message when a required value is missing.
+import { DEFAULT_WORKSPACE_NAME } from "./names";
 
 function required(name: string): string {
   const v = process.env[name];
@@ -18,7 +19,7 @@ export const env = {
     return s;
   },
   get cronSecret() { return required("CRON_SECRET"); },
-  workspaceName: process.env.WORKSPACE_NAME || "My company",
+  workspaceName: process.env.WORKSPACE_NAME || DEFAULT_WORKSPACE_NAME,
   timezone: process.env.TIMEZONE || "America/New_York",
   linkedin: {
     get clientId() { return required("LINKEDIN_CLIENT_ID"); },
@@ -33,9 +34,5 @@ export const env = {
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY || "",
     model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
-  },
-  github: {
-    token: process.env.GITHUB_TOKEN || "",
-    repo: process.env.GITHUB_REPO || "",
   },
 };
