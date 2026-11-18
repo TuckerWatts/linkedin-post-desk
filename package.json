@@ -1,0 +1,35 @@
+{
+  "name": "post-desk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plan, approve, publish and reshare LinkedIn posts for a company page and its founder.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:seed": "tsx scripts/seed.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "job": "tsx scripts/run-job.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
+    "next": "14.2.15",
+    "pdf-lib": "^1.17.1",
+    "pg": "^8.13.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.0",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}

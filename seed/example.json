@@ -1,0 +1,67 @@
+{
+  "voice": "Audience: independent coffee shop owners.\nPosts go out from the company page; the founder reshares from their personal profile with a short note.\nWarm and specific. Real details, nothing generic.\nNo em dashes, no buzzwords, 0-2 hashtags.\nKeep links out of most posts.\nVary length and format; a carousel now and then.",
+  "accounts": [
+    {
+      "id": "founder",
+      "kind": "Personal profile",
+      "name": "Alex Rivera",
+      "url": "https://www.linkedin.com/in/example"
+    },
+    {
+      "id": "company",
+      "kind": "Company page",
+      "name": "Acme Coffee Roasters",
+      "url": "https://www.linkedin.com/company/example"
+    }
+  ],
+  "posts": [
+    {
+      "key": "p-first-pour",
+      "status": "scheduled",
+      "account": "company",
+      "topic": "The first pour of the day",
+      "body": "The first pour of the day is always for the team.\n\nBefore the doors open, before the grinder warms up for real, someone pulls a shot and everyone tastes it. If it's off, we fix it before a customer ever sees it.\n\nWhat's the small ritual your shop can't skip?",
+      "shareNote": "Five minutes that saves the whole morning.",
+      "scheduledFor": "2026-12-01T14:00:00.000Z",
+      "suggestedFor": null,
+      "postedAt": null,
+      "url": null,
+      "format": null,
+      "attachment": null,
+      "docTitle": null,
+      "sourceRefs": null
+    },
+    {
+      "key": "p-regulars",
+      "status": "draft",
+      "account": "company",
+      "topic": "Knowing the regulars",
+      "body": "Our best barista knows 40 regulars by order, not by name.\n\nOat flat white, extra hot. Cortado, no sugar, in a glass. It sounds small. It's the reason those 40 people come back.",
+      "shareNote": null,
+      "scheduledFor": null,
+      "suggestedFor": "2026-12-04T15:30:00.000Z",
+      "postedAt": null,
+      "url": null,
+      "format": null,
+      "attachment": null,
+      "docTitle": null,
+      "sourceRefs": null
+    },
+    {
+      "key": "p-founder-note",
+      "status": "draft",
+      "account": "founder",
+      "topic": "Why we roast in small batches",
+      "body": "We roast in 12 kilo batches. It's slower and it costs more.\n\nIt also means we can taste every batch before it ships, and that's the whole point.",
+      "shareNote": null,
+      "scheduledFor": null,
+      "suggestedFor": null,
+      "postedAt": null,
+      "url": null,
+      "format": null,
+      "attachment": null,
+      "docTitle": null,
+      "sourceRefs": null
+    }
+  ]
+}
